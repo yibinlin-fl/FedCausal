@@ -1,0 +1,67 @@
+project_name: FedCausal
+device: cuda
+seed: 42
+
+dataset:
+  name: cifar10
+  data_root: /kaggle/working/data
+  cifar10c_root: /kaggle/input/cifar10-c
+  num_classes: 10
+
+federated:
+  num_clients: 10
+  participation_rate: 1.0
+  rounds: 20
+  local_epochs: 1
+  batch_size: 64
+  dirichlet_alpha: 0.3
+
+model:
+  feature_dim: 128
+  client_models:
+    - cnn_small
+    - cnn_small
+    - cnn_small
+    - cnn_small
+    - resnet18
+    - resnet18
+    - resnet18
+    - mobilenetv2
+    - mobilenetv2
+    - mobilenetv2
+
+optimizer:
+  name: adam
+  lr: 0.001
+  weight_decay: 0.0005
+
+fedcausal:
+  use_fft_mask: true
+  use_counterfactual: true
+  lambda_inv: 0.1
+  lambda_mask: 0.01
+  lambda_scl: 0.1
+  lambda_sparse: 0.0001
+  tau_s: 0.2
+  mask_init: 0.5
+
+aggregation:
+  mode: mask_proto_energy
+  beta: 1.0
+  tau: 1.0
+
+corruption:
+  enable_train_corruption: false
+  client_ratio: 0.0
+  type: gaussian_noise
+  severity: 3
+
+attack:
+  type: none
+  malicious_ratio: 0.0
+  scale_factor: 10
+
+output:
+  result_dir: /kaggle/working/FedCausal/results
+  checkpoint_dir: /kaggle/working/FedCausal/checkpoints
+  figure_dir: /kaggle/working/FedCausal/figures

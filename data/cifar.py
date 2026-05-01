@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+import csv
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
+from data.corruptions import CorruptedDataset
 from data.partition import (
     compute_client_label_distribution,
     dirichlet_partition,
@@ -74,6 +76,42 @@ def _cfg_value(
     return cfg.get(section, {}).get(key, default)
 
 
+def select_corrupted_clients(
+    num_clients: int,
+    client_ratio: float,
+    seed: int,
+) -> List[int]:
+    """Select a reproducible subset of clients for train-time corruption."""
+    client_ratio = max(0.0, min(1.0, float(client_ratio)))
+    num_corrupted = int(round(num_clients * client_ratio))
+    if num_corrupted <= 0:
+        return []
+
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    perm = torch.randperm(num_clients, generator=generator).tolist()
+    return sorted(perm[:num_corrupted])
+
+
+def save_corrupted_client_ids(
+    corrupted_client_ids: List[int],
+    csv_path: str | Path,
+    corruption_type: str,
+    severity: int,
+) -> Path:
+    """Save selected corrupted client ids for reproducibility."""
+    csv_path = Path(csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["client_id", "corruption_type", "severity"])
+        for client_id in corrupted_client_ids:
+            writer.writerow([client_id, corruption_type, severity])
+
+    return csv_path
+
+
 def build_client_loaders(
     cfg: Optional[Mapping[str, Any]] = None,
     data_root: Optional[str | Path] = None,
@@ -109,6 +147,16 @@ def build_client_loaders(
     )
 
     train_dataset, test_dataset = get_cifar10_datasets(data_root=data_root, download=download)
+    corruption_cfg = cfg.get("corruption", {}) if cfg else {}
+    enable_train_corruption = bool(corruption_cfg.get("enable_train_corruption", False))
+    train_corruption_ratio = float(corruption_cfg.get("client_ratio", 0.0))
+    train_corruption_type = str(corruption_cfg.get("type", "gaussian_noise"))
+    train_corruption_severity = int(corruption_cfg.get("severity", 3))
+    corrupted_client_ids = (
+        select_corrupted_clients(num_clients, train_corruption_ratio, seed)
+        if enable_train_corruption
+        else []
+    )
 
     client_indices = dirichlet_partition(
         dataset=train_dataset,
@@ -123,10 +171,30 @@ def build_client_loaders(
     csv_path = result_dir / "client_label_distribution.csv"
     save_client_label_distribution(distribution, csv_path)
     print(f"Saved client label distribution to: {csv_path}")
+    if enable_train_corruption:
+        corrupted_csv_path = result_dir / "corrupted_client_ids.csv"
+        save_corrupted_client_ids(
+            corrupted_client_ids,
+            corrupted_csv_path,
+            train_corruption_type,
+            train_corruption_severity,
+        )
+        print(
+            "Corrupted clients: "
+            f"ids={corrupted_client_ids}, type={train_corruption_type}, "
+            f"severity={train_corruption_severity}"
+        )
+        print(f"Saved corrupted client ids to: {corrupted_csv_path}")
 
     client_loaders: Dict[int, DataLoader] = {}
     for client_id in range(num_clients):
         subset = Subset(train_dataset, client_indices[client_id])
+        if client_id in corrupted_client_ids:
+            subset = CorruptedDataset(
+                subset,
+                corruption_type=train_corruption_type,
+                severity=train_corruption_severity,
+            )
         generator = torch.Generator()
         generator.manual_seed(seed + client_id)
         client_loaders[client_id] = DataLoader(
@@ -146,4 +214,5 @@ def build_client_loaders(
         pin_memory=pin_memory,
     )
 
+    build_client_loaders.last_corrupted_client_ids = corrupted_client_ids
     return client_loaders, test_loader, client_indices

@@ -11,7 +11,11 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
 
+from attacks.label_flip import flip_labels, save_malicious_client_ids, select_malicious_clients
+from attacks.prototype_scaling import apply_prototype_scaling_to_payload
+from attacks.visualization import save_attack_visualizations
 from data.cifar import build_client_loaders
+from federated.aggregation import aggregate_mask_and_prototypes
 from losses.prototype_scl import prototype_scl_loss
 from methods.frequency_mask import LearnableFrequencyMask
 from models import build_model
@@ -73,6 +77,9 @@ class FedCausalMaskClient:
         lambda_scl: float,
         lambda_mask: float,
         lambda_sparse: float,
+        attack_type: str = "none",
+        is_malicious: bool = False,
+        scale_factor: float = 10.0,
     ) -> None:
         self.client_id = client_id
         self.model = model.to(device)
@@ -87,7 +94,15 @@ class FedCausalMaskClient:
         self.lambda_scl = lambda_scl
         self.lambda_mask = lambda_mask
         self.lambda_sparse = lambda_sparse
+        self.attack_type = attack_type
+        self.is_malicious = is_malicious
+        self.scale_factor = scale_factor
         self.criterion = nn.CrossEntropyLoss()
+
+    def _training_labels(self, labels: torch.Tensor) -> torch.Tensor:
+        if self.is_malicious and self.attack_type == "label_flip":
+            return flip_labels(labels, self.num_classes)
+        return labels
 
     def sync_mask(self, global_mask: torch.Tensor) -> None:
         """Initialize or synchronize the local learnable mask from the server."""
@@ -118,16 +133,17 @@ class FedCausalMaskClient:
             for images, labels in self.train_loader:
                 images = images.to(self.device)
                 labels = labels.to(self.device)
+                train_labels = self._training_labels(labels)
 
                 self.optimizer.zero_grad(set_to_none=True)
                 x_c, _, _, local_mask = self.frequency_mask.apply_causal_filter(images)
                 features = self.model.extract_features(x_c)
                 logits = self.model.classifier(features)
 
-                loss_ce = self.criterion(logits, labels)
+                loss_ce = self.criterion(logits, train_labels)
                 loss_scl = prototype_scl_loss(
                     features=features,
-                    labels=labels,
+                    labels=train_labels,
                     global_prototypes=global_prototypes,
                     tau_s=self.tau_s,
                 )
@@ -146,7 +162,7 @@ class FedCausalMaskClient:
                 total_loss += loss.item() * batch_size
                 total_loss_mask += loss_mask.item() * batch_size
                 total_loss_sparse += loss_sparse.item() * batch_size
-                total_correct += (logits.argmax(dim=1) == labels).sum().item()
+                total_correct += (logits.argmax(dim=1) == train_labels).sum().item()
                 total_samples += batch_size
 
         mask_stats = self.frequency_mask.stats()
@@ -170,10 +186,11 @@ class FedCausalMaskClient:
         for images, labels in self.train_loader:
             images = images.to(self.device)
             labels = labels.to(self.device)
+            proto_labels = self._training_labels(labels)
             x_c, _, _, _ = self.frequency_mask.apply_causal_filter(images)
             features = self.model.extract_features(x_c)
-            sums.index_add_(0, labels, features)
-            counts.index_add_(0, labels, torch.ones_like(labels, dtype=sums.dtype))
+            sums.index_add_(0, proto_labels, features)
+            counts.index_add_(0, proto_labels, torch.ones_like(proto_labels, dtype=sums.dtype))
 
         valid_classes = counts > 0
         prototypes = torch.zeros_like(sums)
@@ -188,6 +205,9 @@ class FedCausalMaskClient:
             "local_mask": local_mask,
             "num_samples": counts.sum().detach().cpu(),
         }
+        if self.is_malicious and self.attack_type == "prototype_scaling":
+            payload = apply_prototype_scaling_to_payload(payload, self.scale_factor)
+        return payload
 
     @torch.no_grad()
     def evaluate(self, test_loader: DataLoader) -> Dict[str, float]:
@@ -227,6 +247,9 @@ class FedCausalMaskServer:
         mask_shape: tuple[int, int, int, int],
         mask_init: float,
         device: torch.device | str,
+        aggregation_mode: str = "mask_proto_energy",
+        beta: float = 1.0,
+        tau: float = 1.0,
     ) -> None:
         self.num_classes = num_classes
         self.feature_dim = feature_dim
@@ -235,6 +258,10 @@ class FedCausalMaskServer:
         self.global_counts = torch.zeros(num_classes)
         self.valid_classes = torch.zeros(num_classes, dtype=torch.bool)
         self.global_mask = torch.full(mask_shape, float(mask_init))
+        self.aggregation_mode = aggregation_mode
+        self.beta = beta
+        self.tau = tau
+        self.last_client_stats: List[Dict[str, float]] = []
 
     def get_global_prototypes(self) -> torch.Tensor | None:
         """Return global prototypes on the server device."""
@@ -246,11 +273,24 @@ class FedCausalMaskServer:
         """Return global mask on the server device."""
         return self.global_mask.to(self.device)
 
-    def aggregate(self, payloads: Iterable[Dict[str, torch.Tensor]]) -> None:
-        """Aggregate prototypes by class counts and masks by sample counts."""
-        payloads = list(payloads)
-        self._aggregate_prototypes(payloads)
-        self._aggregate_masks(payloads)
+    def aggregate(self, payloads: Iterable[Dict[str, torch.Tensor]]) -> List[Dict[str, float]]:
+        """Aggregate prototypes and masks with the configured strategy."""
+        result = aggregate_mask_and_prototypes(
+            payloads,
+            num_classes=self.num_classes,
+            feature_dim=self.feature_dim,
+            current_prototypes=self.global_prototypes,
+            current_mask=self.global_mask,
+            mode=self.aggregation_mode,
+            beta=self.beta,
+            tau=self.tau,
+        )
+        self.global_prototypes = result.global_prototypes
+        self.global_counts = torch.zeros(self.num_classes)
+        self.valid_classes = self.global_prototypes.norm(dim=1) > 0
+        self.global_mask = result.global_mask
+        self.last_client_stats = result.client_stats
+        return self.last_client_stats
 
     def _aggregate_prototypes(self, payloads: List[Dict[str, torch.Tensor]]) -> None:
         sums = torch.zeros(self.num_classes, self.feature_dim)
@@ -349,6 +389,17 @@ def run_fedcausal_mask(
     lambda_mask = float(_cfg(config, "fedcausal", "lambda_mask", 0.01))
     lambda_sparse = float(_cfg(config, "fedcausal", "lambda_sparse", 0.0001))
     mask_init = float(_cfg(config, "fedcausal", "mask_init", 0.5))
+    aggregation_mode = str(_cfg(config, "aggregation", "mode", "mask_proto_energy"))
+    aggregation_beta = float(_cfg(config, "aggregation", "beta", 1.0))
+    aggregation_tau = float(_cfg(config, "aggregation", "tau", 1.0))
+    attack_type = str(_cfg(config, "attack", "type", "none")).lower()
+    malicious_ratio = float(_cfg(config, "attack", "malicious_ratio", 0.0))
+    scale_factor = float(_cfg(config, "attack", "scale_factor", 10.0))
+    malicious_client_ids = (
+        select_malicious_clients(num_clients, malicious_ratio, seed)
+        if attack_type != "none"
+        else []
+    )
 
     client_loaders, test_loader, _ = build_client_loaders(
         cfg=config,
@@ -386,6 +437,9 @@ def run_fedcausal_mask(
                 lambda_scl=lambda_scl,
                 lambda_mask=lambda_mask,
                 lambda_sparse=lambda_sparse,
+                attack_type=attack_type,
+                is_malicious=client_id in malicious_client_ids,
+                scale_factor=scale_factor,
             )
         )
 
@@ -395,6 +449,9 @@ def run_fedcausal_mask(
         mask_shape=(1, 3, 32, 32),
         mask_init=mask_init,
         device=device,
+        aggregation_mode=aggregation_mode,
+        beta=aggregation_beta,
+        tau=aggregation_tau,
     )
 
     result_dir = Path(_cfg(config, "output", "result_dir", "/kaggle/working/FedCausal/results"))
@@ -402,6 +459,16 @@ def run_fedcausal_mask(
         _cfg(config, "output", "checkpoint_dir", "/kaggle/working/FedCausal/checkpoints")
     )
     figure_dir = Path(_cfg(config, "output", "figure_dir", "/kaggle/working/FedCausal/figures"))
+    malicious_ids_path = result_dir / "malicious_client_ids.json"
+    save_malicious_client_ids(
+        malicious_client_ids,
+        malicious_ids_path,
+        attack_type=attack_type,
+        malicious_ratio=malicious_ratio,
+        scale_factor=scale_factor,
+    )
+    print(f"Malicious clients: {malicious_client_ids}")
+    print(f"Saved malicious client ids to: {malicious_ids_path}")
 
     logger = CSVLogger(
         result_dir / "fedcausal_mask_clean_results.csv",
@@ -416,6 +483,23 @@ def run_fedcausal_mask(
             "mask_std",
             "loss_mask",
             "loss_sparse",
+        ],
+        reset=True,
+    )
+    attack_logger = CSVLogger(
+        result_dir / "attack_results.csv",
+        fieldnames=[
+            "round",
+            "method",
+            "attack_type",
+            "malicious_ratio",
+            "client_id",
+            "is_malicious",
+            "d_mask",
+            "d_proto",
+            "energy",
+            "alpha_i",
+            "clean_acc",
         ],
         reset=True,
     )
@@ -441,7 +525,10 @@ def run_fedcausal_mask(
                 f"mask_mean={train_metrics['mask_mean']:.4f}"
             )
 
-        server.aggregate(payloads)
+        aggregation_stats = server.aggregate(payloads)
+        aggregation_stats_by_client = {
+            int(stat["client_id"]): stat for stat in aggregation_stats
+        }
         current_global_mask = server.get_global_mask().detach().cpu()
         mask_path = checkpoint_dir / "global_mask.pt"
         mask_path.parent.mkdir(parents=True, exist_ok=True)
@@ -455,9 +542,11 @@ def run_fedcausal_mask(
             print(f"  saved mask heatmap: {heatmap_path}")
 
         clean_accs = []
+        clean_acc_by_client: Dict[int, float] = {}
         for client in clients:
             eval_metrics = client.evaluate(test_loader)
             clean_acc = eval_metrics["accuracy"]
+            clean_acc_by_client[client.client_id] = clean_acc
             clean_accs.append(clean_acc)
             train_metrics = train_metrics_by_client.get(client.client_id, {})
             mask_stats = client.frequency_mask.stats()
@@ -476,6 +565,24 @@ def run_fedcausal_mask(
             }
             logger.log(row)
             history.append(row)
+
+        for client_id in selected_client_ids:
+            stat = aggregation_stats_by_client.get(client_id, {})
+            attack_logger.log(
+                {
+                    "round": round_id,
+                    "method": "fedcausal_mask",
+                    "attack_type": attack_type,
+                    "malicious_ratio": malicious_ratio,
+                    "client_id": client_id,
+                    "is_malicious": client_id in malicious_client_ids,
+                    "d_mask": stat.get("d_mask", ""),
+                    "d_proto": stat.get("d_proto", ""),
+                    "energy": stat.get("energy", ""),
+                    "alpha_i": stat.get("alpha_i", ""),
+                    "clean_acc": clean_acc_by_client.get(client_id, ""),
+                }
+            )
 
         mean_clean_acc = sum(clean_accs) / len(clean_accs) if clean_accs else 0.0
         print(
@@ -498,10 +605,21 @@ def run_fedcausal_mask(
             )
             print(f"  saved checkpoint: {checkpoint_path}")
 
+    attack_figure_paths = save_attack_visualizations(
+        result_dir / "attack_results.csv",
+        figure_dir,
+        method="fedcausal_mask",
+        attack_type=attack_type,
+        malicious_ratio=malicious_ratio,
+        scale_factor=scale_factor,
+    )
+
     return {
         "history": history,
         "server": server,
         "clients": clients,
         "result_csv": result_dir / "fedcausal_mask_clean_results.csv",
         "global_mask_path": checkpoint_dir / "global_mask.pt",
+        "attack_csv": result_dir / "attack_results.csv",
+        "attack_figures": attack_figure_paths,
     }

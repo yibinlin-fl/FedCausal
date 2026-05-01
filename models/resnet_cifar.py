@@ -29,7 +29,7 @@ class ResNet18CIFAR(nn.Module):
         self.backbone = net
         self.projector = nn.Sequential(
             nn.Linear(in_features, feature_dim),
-            nn.BatchNorm1d(feature_dim),
+            nn.LayerNorm(feature_dim),
             nn.ReLU(inplace=True),
         )
         self.classifier = nn.Linear(feature_dim, num_classes)

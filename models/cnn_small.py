@@ -36,7 +36,7 @@ class CNNSmall(nn.Module):
         self.projector = nn.Sequential(
             nn.Flatten(),
             nn.Linear(128, feature_dim),
-            nn.BatchNorm1d(feature_dim),
+            nn.LayerNorm(feature_dim),
             nn.ReLU(inplace=True),
         )
         self.classifier = nn.Linear(feature_dim, num_classes)

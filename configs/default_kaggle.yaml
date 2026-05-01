@@ -38,6 +38,7 @@ optimizer:
 fedcausal:
   use_fft_mask: true
   use_counterfactual: true
+  disable_inv: false
   lambda_inv: 0.1
   lambda_mask: 0.01
   lambda_scl: 0.1

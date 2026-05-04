@@ -174,9 +174,119 @@ print("Global mask checkpoint:", mvp_outputs.get("global_mask_path"))
 # %%
 # Cell 7：运行 CIFAR-10-C 评估
 import csv
+import tarfile
+import urllib.request
 
-cifar10c_root = Path(config["dataset"].get("cifar10c_root", "/kaggle/input/cifar10-c"))
-if cifar10c_root.exists():
+CIFAR10C_URL = "https://zenodo.org/records/2535967/files/CIFAR-10-C.tar?download=1"
+CIFAR10C_ARCHIVE = "CIFAR-10-C.tar"
+CIFAR10C_WORKING_ROOT = Path("/kaggle/working/CIFAR-10-C")
+CIFAR10C_WORKING_ARCHIVE = Path("/kaggle/working") / CIFAR10C_ARCHIVE
+
+
+def find_cifar10c_root(*roots):
+    """Return the directory that directly contains CIFAR-10-C labels.npy."""
+    candidates = []
+    for root in roots:
+        if root is not None:
+            candidates.append(Path(root))
+    candidates.extend(
+        [
+            CIFAR10C_WORKING_ROOT,
+            Path("/kaggle/working/cifar10-c"),
+            Path("/kaggle/input"),
+        ]
+    )
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+
+        if (candidate / "labels.npy").exists():
+            return candidate
+        nested = candidate / "CIFAR-10-C"
+        if (nested / "labels.npy").exists():
+            return nested
+
+        if candidate == Path("/kaggle/input"):
+            for labels_path in candidate.rglob("labels.npy"):
+                parent = labels_path.parent
+                if (parent / "gaussian_noise.npy").exists():
+                    return parent
+    return None
+
+
+def find_cifar10c_archive():
+    candidates = [CIFAR10C_WORKING_ARCHIVE, Path("/kaggle/input")]
+    for candidate in candidates:
+        if candidate.is_file() and candidate.name == CIFAR10C_ARCHIVE:
+            return candidate
+        if candidate.is_dir():
+            for archive_path in candidate.rglob(CIFAR10C_ARCHIVE):
+                if archive_path.is_file():
+                    return archive_path
+    return None
+
+
+def safe_extract_tar(archive_path, extract_root):
+    """Extract tar without allowing paths outside extract_root."""
+    extract_root = Path(extract_root)
+    extract_root.mkdir(parents=True, exist_ok=True)
+    extract_root_resolved = extract_root.resolve()
+    with tarfile.open(archive_path, "r") as tar:
+        for member in tar.getmembers():
+            target_path = (extract_root / member.name).resolve()
+            try:
+                target_path.relative_to(extract_root_resolved)
+            except ValueError:
+                raise RuntimeError(f"Unsafe path in CIFAR-10-C archive: {member.name}")
+        tar.extractall(path=extract_root)
+
+
+def ensure_cifar10c_root(config):
+    """Find, extract, or download CIFAR-10-C for Kaggle evaluation."""
+    configured_root = Path(config["dataset"].get("cifar10c_root", "/kaggle/input/cifar10-c"))
+    root = find_cifar10c_root(configured_root)
+    if root is not None:
+        print("Using CIFAR-10-C from:", root)
+        return root
+
+    archive_path = find_cifar10c_archive()
+    if archive_path is None:
+        print("CIFAR-10-C not found locally. Downloading from Zenodo...")
+        print("URL:", CIFAR10C_URL)
+        print("Target:", CIFAR10C_WORKING_ARCHIVE)
+        try:
+            urllib.request.urlretrieve(CIFAR10C_URL, CIFAR10C_WORKING_ARCHIVE)
+        except Exception as exc:
+            print("CIFAR-10-C download failed:", repr(exc))
+            print("Please enable Internet in the Kaggle notebook, then rerun this cell.")
+            return None
+        archive_path = CIFAR10C_WORKING_ARCHIVE
+    else:
+        print("Found CIFAR-10-C archive:", archive_path)
+
+    print("Extracting CIFAR-10-C archive to /kaggle/working ...")
+    safe_extract_tar(archive_path, Path("/kaggle/working"))
+    root = find_cifar10c_root(CIFAR10C_WORKING_ROOT, Path("/kaggle/working"))
+    if root is None:
+        print("CIFAR-10-C archive extracted, but labels.npy was not found.")
+        return None
+
+    print("Using CIFAR-10-C from:", root)
+    return root
+
+
+cifar10c_root = ensure_cifar10c_root(config)
+if cifar10c_root is not None and cifar10c_root.exists():
+    config["dataset"]["cifar10c_root"] = str(cifar10c_root)
     if "mvp_outputs" not in globals():
         print("未检测到 mvp_outputs，先运行一个小规模 FedCausal-MVP 供 CIFAR-10-C 评估。")
         eval_config = set_debug_federated(config, num_clients=5, rounds=3, local_epochs=1)
@@ -184,6 +294,10 @@ if cifar10c_root.exists():
         eval_config["fedcausal"]["disable_inv"] = False
         mvp_outputs = run_fedcausal_mvp(eval_config, debug=True, disable_inv=False)
         mvp_config = eval_config
+    else:
+        if "mvp_config" not in globals():
+            mvp_config = copy.deepcopy(config)
+        mvp_config["dataset"]["cifar10c_root"] = str(cifar10c_root)
 
     corruption_rows = evaluate_method_on_cifar10c(
         method="fedcausal_mvp",
@@ -222,10 +336,8 @@ if cifar10c_root.exists():
     print("CIFAR-10-C rows:", len(corruption_rows))
     print("Saved:", corruption_csv)
 else:
-    print(
-        "未检测到 CIFAR-10-C，请在 Kaggle Dataset 中添加 CIFAR-10-C 数据集，"
-        "并确保路径为 /kaggle/input/cifar10-c/。本 cell 已跳过。"
-    )
+    print("CIFAR-10-C is unavailable, so Cell 7 was skipped.")
+    print("Enable Internet in the Kaggle notebook and rerun Cell 7 to download it from Zenodo.")
 
 # %%
 # Cell 8：运行攻击实验

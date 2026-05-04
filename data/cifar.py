@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import csv
+import tarfile
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+from urllib.error import HTTPError, URLError
 
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -21,6 +23,8 @@ from data.partition import (
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2470, 0.2435, 0.2616)
+CIFAR10_DIRNAME = "cifar-10-batches-py"
+CIFAR10_ARCHIVE_NAME = "cifar-10-python.tar.gz"
 
 
 def build_cifar10_transforms() -> Tuple[transforms.Compose, transforms.Compose]:
@@ -42,26 +46,136 @@ def build_cifar10_transforms() -> Tuple[transforms.Compose, transforms.Compose]:
     return train_transform, test_transform
 
 
+def _iter_existing_roots(data_root: Path) -> List[Path]:
+    candidates = [
+        data_root,
+        data_root.parent,
+        Path("/kaggle/working/data"),
+        Path("/kaggle/input"),
+    ]
+
+    roots: List[Path] = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        if resolved not in seen:
+            seen.add(resolved)
+            roots.append(candidate)
+    return roots
+
+
+def _find_local_cifar10_root(data_root: Path) -> Optional[Path]:
+    for root in _iter_existing_roots(data_root):
+        if (root / CIFAR10_DIRNAME).is_dir():
+            return root
+
+    input_root = Path("/kaggle/input")
+    if input_root.exists():
+        for path in input_root.rglob(CIFAR10_DIRNAME):
+            if path.is_dir():
+                return path.parent
+
+    return None
+
+
+def _find_cifar10_archive(data_root: Path) -> Optional[Path]:
+    for root in _iter_existing_roots(data_root):
+        archive = root / CIFAR10_ARCHIVE_NAME
+        if archive.is_file():
+            return archive
+
+    input_root = Path("/kaggle/input")
+    if input_root.exists():
+        for archive in input_root.rglob(CIFAR10_ARCHIVE_NAME):
+            if archive.is_file():
+                return archive
+
+    return None
+
+
+def _extract_cifar10_archive(archive_path: Path, data_root: Path) -> Path:
+    data_root.mkdir(parents=True, exist_ok=True)
+    target_dir = data_root / CIFAR10_DIRNAME
+    if target_dir.is_dir():
+        return data_root
+
+    print(f"Found CIFAR-10 archive: {archive_path}")
+    print(f"Extracting CIFAR-10 to: {data_root}")
+    with tarfile.open(archive_path, "r:gz") as tar:
+        tar.extractall(path=data_root)
+    return data_root
+
+
+def _missing_cifar10_message(data_root: Path, original_error: Exception | None = None) -> str:
+    message = (
+        "CIFAR-10 is not available locally and automatic download failed. "
+        "On Kaggle, add a CIFAR-10 dataset that contains either "
+        f"{CIFAR10_ARCHIVE_NAME} or the extracted {CIFAR10_DIRNAME}/ directory, "
+        f"or upload it under {data_root}. "
+        "If you want torchvision to download it, enable Internet in the Kaggle notebook "
+        "and rerun the cell."
+    )
+    if original_error is not None:
+        message += f" Original error: {type(original_error).__name__}: {original_error}"
+    return message
+
+
 def get_cifar10_datasets(
     data_root: str | Path = "/kaggle/working/data",
     download: bool = True,
 ) -> Tuple[datasets.CIFAR10, datasets.CIFAR10]:
-    """Load CIFAR-10 train and clean test datasets."""
+    """Load CIFAR-10 train and clean test datasets.
+
+    Kaggle can intermittently fail torchvision's CIFAR-10 download URL. Prefer
+    an attached Kaggle dataset or a pre-extracted local copy before downloading.
+    """
     train_transform, test_transform = build_cifar10_transforms()
     data_root = Path(data_root)
 
-    train_dataset = datasets.CIFAR10(
-        root=str(data_root),
-        train=True,
-        transform=train_transform,
-        download=download,
-    )
-    test_dataset = datasets.CIFAR10(
-        root=str(data_root),
-        train=False,
-        transform=test_transform,
-        download=download,
-    )
+    local_root = _find_local_cifar10_root(data_root)
+    if local_root is None:
+        archive_path = _find_cifar10_archive(data_root)
+        if archive_path is not None:
+            local_root = _extract_cifar10_archive(archive_path, data_root)
+
+    if local_root is not None:
+        print(f"Using local CIFAR-10 from: {local_root}")
+        train_dataset = datasets.CIFAR10(
+            root=str(local_root),
+            train=True,
+            transform=train_transform,
+            download=False,
+        )
+        test_dataset = datasets.CIFAR10(
+            root=str(local_root),
+            train=False,
+            transform=test_transform,
+            download=False,
+        )
+        return train_dataset, test_dataset
+
+    try:
+        data_root.mkdir(parents=True, exist_ok=True)
+        train_dataset = datasets.CIFAR10(
+            root=str(data_root),
+            train=True,
+            transform=train_transform,
+            download=download,
+        )
+        test_dataset = datasets.CIFAR10(
+            root=str(data_root),
+            train=False,
+            transform=test_transform,
+            download=download,
+        )
+    except (HTTPError, URLError, RuntimeError) as exc:
+        raise RuntimeError(_missing_cifar10_message(data_root, exc)) from exc
+
     return train_dataset, test_dataset
 
 

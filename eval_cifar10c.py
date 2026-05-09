@@ -16,7 +16,7 @@ from data.cifar10c import (
     SUPPORTED_CIFAR10C_CORRUPTIONS,
     SUPPORTED_CIFAR10C_SEVERITIES,
     build_cifar10c_loader,
-    cifar10c_available,
+    ensure_cifar10c_root,
 )
 from methods.fedcausal_mask import run_fedcausal_mask
 from methods.fedcausal_mvp import run_fedcausal_mvp
@@ -105,7 +105,8 @@ def evaluate_method_on_cifar10c(
 ) -> List[Dict[str, Any]]:
     """Evaluate trained client models on clean CIFAR-10 and CIFAR-10-C."""
     root = _cfg(config, "dataset", "cifar10c_root", "/kaggle/input/cifar10-c")
-    if not cifar10c_available(root):
+    root = ensure_cifar10c_root(root, download=True)
+    if root is None:
         print(CIFAR10C_MISSING_MESSAGE)
         return []
 

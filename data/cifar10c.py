@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import tarfile
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
@@ -15,6 +16,11 @@ from data.cifar import CIFAR10_MEAN, CIFAR10_STD
 
 
 CIFAR10C_ROOT = Path("/kaggle/input/cifar10-c")
+CIFAR10C_URL = "https://zenodo.org/records/2535967/files/CIFAR-10-C.tar?download=1"
+CIFAR10C_ARCHIVE_NAME = "CIFAR-10-C.tar"
+CIFAR10C_WORKING_ROOT = Path("/kaggle/working/CIFAR-10-C")
+CIFAR10C_WORKING_ARCHIVE = Path("/kaggle/working") / CIFAR10C_ARCHIVE_NAME
+
 SUPPORTED_CIFAR10C_CORRUPTIONS = [
     "gaussian_noise",
     "shot_noise",
@@ -26,9 +32,113 @@ SUPPORTED_CIFAR10C_CORRUPTIONS = [
 ]
 SUPPORTED_CIFAR10C_SEVERITIES = [1, 3, 5]
 CIFAR10C_MISSING_MESSAGE = (
-    "未检测到 CIFAR-10-C，请在 Kaggle Dataset 中添加 CIFAR-10-C 数据集，"
-    "并确保路径为 /kaggle/input/cifar10-c/。"
+    "CIFAR-10-C was not found. On Kaggle, either enable Internet so the notebook "
+    "can download it from Zenodo, or attach/upload a dataset containing labels.npy "
+    "and corruption .npy files such as gaussian_noise.npy."
 )
+
+
+def _candidate_roots(configured_root: str | Path = CIFAR10C_ROOT) -> list[Path]:
+    roots = [
+        Path(configured_root),
+        CIFAR10C_WORKING_ROOT,
+        Path("/kaggle/working/cifar10-c"),
+        Path("/kaggle/working"),
+        Path("/kaggle/input"),
+    ]
+    return [root for root in roots if root.exists()]
+
+
+def find_cifar10c_root(configured_root: str | Path = CIFAR10C_ROOT) -> Optional[Path]:
+    """Find the directory that directly contains CIFAR-10-C labels.npy."""
+    seen = set()
+    for candidate in _candidate_roots(configured_root):
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+
+        if (candidate / "labels.npy").exists() and (candidate / "gaussian_noise.npy").exists():
+            return candidate
+
+        nested = candidate / "CIFAR-10-C"
+        if (nested / "labels.npy").exists() and (nested / "gaussian_noise.npy").exists():
+            return nested
+
+        if candidate.name in {"input", "working"}:
+            for labels_path in candidate.rglob("labels.npy"):
+                parent = labels_path.parent
+                if (parent / "gaussian_noise.npy").exists():
+                    return parent
+    return None
+
+
+def find_cifar10c_archive() -> Optional[Path]:
+    """Find a CIFAR-10-C tar archive in common Kaggle locations."""
+    candidates = [CIFAR10C_WORKING_ARCHIVE, Path("/kaggle/input"), Path("/kaggle/working")]
+    for candidate in candidates:
+        if candidate.is_file() and candidate.name == CIFAR10C_ARCHIVE_NAME:
+            return candidate
+        if candidate.is_dir():
+            for archive_path in candidate.rglob(CIFAR10C_ARCHIVE_NAME):
+                if archive_path.is_file():
+                    return archive_path
+    return None
+
+
+def safe_extract_cifar10c_tar(archive_path: str | Path, extract_root: str | Path) -> None:
+    """Extract a tar archive without allowing paths outside extract_root."""
+    archive_path = Path(archive_path)
+    extract_root = Path(extract_root)
+    extract_root.mkdir(parents=True, exist_ok=True)
+    extract_root_resolved = extract_root.resolve()
+
+    with tarfile.open(archive_path, "r") as tar:
+        for member in tar.getmembers():
+            target_path = (extract_root / member.name).resolve()
+            try:
+                target_path.relative_to(extract_root_resolved)
+            except ValueError as exc:
+                raise RuntimeError(f"Unsafe path in CIFAR-10-C archive: {member.name}") from exc
+        tar.extractall(path=extract_root)
+
+
+def ensure_cifar10c_root(
+    configured_root: str | Path = CIFAR10C_ROOT,
+    download: bool = True,
+) -> Optional[Path]:
+    """Find, extract, or download CIFAR-10-C for Kaggle evaluation."""
+    root = find_cifar10c_root(configured_root)
+    if root is not None:
+        print(f"Using CIFAR-10-C from: {root}")
+        return root
+
+    archive_path = find_cifar10c_archive()
+    if archive_path is None and download:
+        print("CIFAR-10-C not found locally. Trying to download it from Zenodo.")
+        print(f"URL: {CIFAR10C_URL}")
+        print(f"Target: {CIFAR10C_WORKING_ARCHIVE}")
+        try:
+            urllib.request.urlretrieve(CIFAR10C_URL, CIFAR10C_WORKING_ARCHIVE)
+        except Exception as exc:
+            print(f"CIFAR-10-C download failed: {type(exc).__name__}: {exc}")
+            print("Enable Internet in the Kaggle notebook, or attach CIFAR-10-C as a dataset.")
+            return None
+        archive_path = CIFAR10C_WORKING_ARCHIVE
+
+    if archive_path is not None:
+        print(f"Extracting CIFAR-10-C archive: {archive_path}")
+        safe_extract_cifar10c_tar(archive_path, Path("/kaggle/working"))
+        root = find_cifar10c_root(configured_root)
+        if root is not None:
+            print(f"Using CIFAR-10-C from: {root}")
+            return root
+
+    print(CIFAR10C_MISSING_MESSAGE)
+    return None
 
 
 class CIFAR10CDataset(Dataset):
@@ -97,7 +207,7 @@ def build_cifar10c_loader(
     num_workers: int = 2,
     pin_memory: bool = True,
 ) -> Optional[DataLoader]:
-    """Build a CIFAR-10-C loader, returning None when the Kaggle data is missing."""
+    """Build a CIFAR-10-C loader, returning None when the data is missing."""
     try:
         dataset = CIFAR10CDataset(root=root, corruption=corruption, severity=severity)
     except FileNotFoundError:
@@ -115,5 +225,4 @@ def build_cifar10c_loader(
 
 def cifar10c_available(root: str | Path = CIFAR10C_ROOT) -> bool:
     """Return whether the expected CIFAR-10-C files are available."""
-    root = Path(root)
-    return root.exists() and (root / "labels.npy").exists()
+    return find_cifar10c_root(root) is not None

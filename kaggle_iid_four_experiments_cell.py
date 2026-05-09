@@ -24,6 +24,10 @@ print("Working directory:", Path.cwd())
 print("CUDA available:", torch.cuda.is_available())
 if torch.cuda.is_available():
     print("GPU:", torch.cuda.get_device_name(0))
+print(
+    "CIFAR-10-C: if it is not attached under /kaggle/input, the evaluation code "
+    "will try to download it to /kaggle/working. Enable Internet in Kaggle for that path."
+)
 
 config_path = PROJECT_ROOT / "configs" / "default_kaggle.yaml"
 with config_path.open("r", encoding="utf-8") as f:

@@ -18,6 +18,8 @@ from data.cifar import CIFAR10_MEAN, CIFAR10_STD
 CIFAR10C_ROOT = Path("/kaggle/input/cifar10-c")
 CIFAR10C_URL = "https://zenodo.org/records/2535967/files/CIFAR-10-C.tar?download=1"
 CIFAR10C_ARCHIVE_NAME = "CIFAR-10-C.tar"
+CIFAR10C_TEMP_ROOT = Path("/kaggle/temp/CIFAR-10-C")
+CIFAR10C_TEMP_ARCHIVE = Path("/kaggle/temp") / CIFAR10C_ARCHIVE_NAME
 CIFAR10C_WORKING_ROOT = Path("/kaggle/working/CIFAR-10-C")
 CIFAR10C_WORKING_ARCHIVE = Path("/kaggle/working") / CIFAR10C_ARCHIVE_NAME
 
@@ -41,6 +43,9 @@ CIFAR10C_MISSING_MESSAGE = (
 def _candidate_roots(configured_root: str | Path = CIFAR10C_ROOT) -> list[Path]:
     roots = [
         Path(configured_root),
+        CIFAR10C_TEMP_ROOT,
+        Path("/kaggle/temp/cifar10-c"),
+        Path("/kaggle/temp"),
         CIFAR10C_WORKING_ROOT,
         Path("/kaggle/working/cifar10-c"),
         Path("/kaggle/working"),
@@ -68,7 +73,7 @@ def find_cifar10c_root(configured_root: str | Path = CIFAR10C_ROOT) -> Optional[
         if (nested / "labels.npy").exists() and (nested / "gaussian_noise.npy").exists():
             return nested
 
-        if candidate.name in {"input", "working"}:
+        if candidate.name in {"input", "temp", "working"}:
             for labels_path in candidate.rglob("labels.npy"):
                 parent = labels_path.parent
                 if (parent / "gaussian_noise.npy").exists():
@@ -78,7 +83,13 @@ def find_cifar10c_root(configured_root: str | Path = CIFAR10C_ROOT) -> Optional[
 
 def find_cifar10c_archive() -> Optional[Path]:
     """Find a CIFAR-10-C tar archive in common Kaggle locations."""
-    candidates = [CIFAR10C_WORKING_ARCHIVE, Path("/kaggle/input"), Path("/kaggle/working")]
+    candidates = [
+        CIFAR10C_TEMP_ARCHIVE,
+        CIFAR10C_WORKING_ARCHIVE,
+        Path("/kaggle/input"),
+        Path("/kaggle/temp"),
+        Path("/kaggle/working"),
+    ]
     for candidate in candidates:
         if candidate.is_file() and candidate.name == CIFAR10C_ARCHIVE_NAME:
             return candidate
@@ -117,21 +128,24 @@ def ensure_cifar10c_root(
         return root
 
     archive_path = find_cifar10c_archive()
+    cache_root = Path("/kaggle/temp") if Path("/kaggle").exists() else Path("/kaggle/working")
+    archive_target = cache_root / CIFAR10C_ARCHIVE_NAME
     if archive_path is None and download:
         print("CIFAR-10-C not found locally. Trying to download it from Zenodo.")
         print(f"URL: {CIFAR10C_URL}")
-        print(f"Target: {CIFAR10C_WORKING_ARCHIVE}")
+        print(f"Target: {archive_target}")
         try:
-            urllib.request.urlretrieve(CIFAR10C_URL, CIFAR10C_WORKING_ARCHIVE)
+            cache_root.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(CIFAR10C_URL, archive_target)
         except Exception as exc:
             print(f"CIFAR-10-C download failed: {type(exc).__name__}: {exc}")
             print("Enable Internet in the Kaggle notebook, or attach CIFAR-10-C as a dataset.")
             return None
-        archive_path = CIFAR10C_WORKING_ARCHIVE
+        archive_path = archive_target
 
     if archive_path is not None:
         print(f"Extracting CIFAR-10-C archive: {archive_path}")
-        safe_extract_cifar10c_tar(archive_path, Path("/kaggle/working"))
+        safe_extract_cifar10c_tar(archive_path, archive_path.parent)
         root = find_cifar10c_root(configured_root)
         if root is not None:
             print(f"Using CIFAR-10-C from: {root}")

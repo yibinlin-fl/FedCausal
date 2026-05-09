@@ -4,6 +4,7 @@
 
 import os
 import sys
+import zipfile
 from pathlib import Path
 
 import torch
@@ -26,7 +27,7 @@ if torch.cuda.is_available():
     print("GPU:", torch.cuda.get_device_name(0))
 print(
     "CIFAR-10-C: if it is not attached under /kaggle/input, the evaluation code "
-    "will try to download it to /kaggle/working. Enable Internet in Kaggle for that path."
+    "will try to download it to /kaggle/temp. Enable Internet in Kaggle for that path."
 )
 
 config_path = PROJECT_ROOT / "configs" / "default_kaggle.yaml"
@@ -36,7 +37,7 @@ with config_path.open("r", encoding="utf-8") as f:
 # Core IID model-heterogeneity setup.
 config["device"] = "cuda" if torch.cuda.is_available() else "cpu"
 config["federated"]["num_clients"] = 10
-config["federated"]["rounds"] = 20
+config["federated"]["rounds"] = 130
 config["federated"]["local_epochs"] = 1
 config["federated"]["batch_size"] = 64
 config["federated"]["partition_mode"] = "iid"
@@ -58,8 +59,7 @@ config["model"]["client_models"] = [
     "mobilenetv2",
 ]
 
-# Keep these lists small for the first paper-debug pass. Add more corruptions
-# later only after the clean IID run looks sane.
+# Use heavier CIFAR-10-C severities for the longer verification run.
 METHODS = ["fedproto", "fedcausal_mask", "fedcausal_mvp"]
 CORRUPTIONS = [
     "gaussian_noise",
@@ -68,7 +68,7 @@ CORRUPTIONS = [
     "fog",
     "jpeg_compression",
 ]
-SEVERITIES = [1, 3, 5]
+SEVERITIES = [3, 5]
 
 # Default: run Experiment 1, Experiment 2, and Experiment 3.
 # Experiment 3 keeps labels IID but corrupts 30% of client training images.
@@ -110,3 +110,15 @@ for name, output in results.items():
             value = output.get(key)
             if value:
                 print(f"  {key}: {value}")
+
+zip_path = Path("/kaggle/working/fedcausal_iid_130rounds_outputs.zip")
+with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    for folder_name in ("results", "tables", "figures"):
+        folder = PROJECT_ROOT / folder_name
+        if not folder.exists():
+            continue
+        for path in folder.rglob("*"):
+            if path.is_file():
+                zf.write(path, arcname=path.relative_to(PROJECT_ROOT))
+
+print(f"\nPackaged results/tables/figures to: {zip_path}")

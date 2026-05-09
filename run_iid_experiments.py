@@ -22,7 +22,7 @@ DEFAULT_CORRUPTIONS = [
     "fog",
     "jpeg_compression",
 ]
-DEFAULT_SEVERITIES = [1, 3, 5]
+DEFAULT_SEVERITIES = [3, 5]
 
 
 def _cfg(cfg: Mapping[str, Any], section: str, key: str, default: Any) -> Any:

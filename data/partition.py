@@ -75,6 +75,41 @@ def dirichlet_partition(
     )
 
 
+def iid_balanced_partition(
+    dataset: object,
+    num_clients: int,
+    num_classes: int,
+    seed: int,
+) -> Dict[int, List[int]]:
+    """Partition a labeled dataset into balanced IID client splits.
+
+    Each class is shuffled independently and split as evenly as possible across
+    clients, so every client receives nearly the same label histogram. This is
+    the clean control setting used to isolate model heterogeneity from label
+    distribution skew.
+    """
+    if num_clients <= 0:
+        raise ValueError("num_clients must be positive.")
+    if num_classes <= 0:
+        raise ValueError("num_classes must be positive.")
+
+    targets = get_dataset_targets(dataset)
+    rng = np.random.default_rng(seed)
+    client_indices = {client_id: [] for client_id in range(num_clients)}
+
+    for class_id in range(num_classes):
+        class_indices = np.where(targets == class_id)[0]
+        rng.shuffle(class_indices)
+        class_splits = np.array_split(class_indices, num_clients)
+        for client_id, split in enumerate(class_splits):
+            client_indices[client_id].extend(split.astype(int).tolist())
+
+    for indices in client_indices.values():
+        rng.shuffle(indices)
+
+    return client_indices
+
+
 def compute_client_label_distribution(
     dataset: object,
     client_indices: Dict[int, Sequence[int]],

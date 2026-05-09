@@ -20,7 +20,6 @@ from utils.seed import seed_everything
 def _cfg(cfg: Mapping[str, Any], section: str, key: str, default: Any) -> Any:
     return cfg.get(section, {}).get(key, default)
 
-
 def _build_optimizer(model: torch.nn.Module, cfg: Mapping[str, Any]) -> torch.optim.Optimizer:
     name = str(_cfg(cfg, "optimizer", "name", "adam")).lower()
     lr = float(_cfg(cfg, "optimizer", "lr", 0.001))
@@ -81,7 +80,12 @@ def run_fedproto(
     local_epochs = int(_cfg(config, "federated", "local_epochs", 1))
     participation_rate = float(_cfg(config, "federated", "participation_rate", 1.0))
     tau_s = float(_cfg(config, "fedcausal", "tau_s", 0.2))
-    lambda_scl = float(_cfg(config, "fedcausal", "lambda_scl", 0.1))
+    lambda_proto = float(
+        config.get("fedproto", {}).get(
+            "lambda_proto",
+            _cfg(config, "fedcausal", "lambda_scl", 0.1),
+        )
+    )
 
     client_loaders, test_loader, _ = build_client_loaders(
         cfg=config,
@@ -114,7 +118,8 @@ def run_fedproto(
                 feature_dim=feature_dim,
                 local_epochs=local_epochs,
                 tau_s=tau_s,
-                lambda_scl=lambda_scl,
+                lambda_scl=lambda_proto,
+                lambda_proto=lambda_proto,
             )
         )
 

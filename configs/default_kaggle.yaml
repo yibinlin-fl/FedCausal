@@ -14,6 +14,7 @@ federated:
   rounds: 20
   local_epochs: 1
   batch_size: 64
+  partition_mode: dirichlet
   dirichlet_alpha: 0.3
 
 model:
@@ -45,6 +46,9 @@ fedcausal:
   lambda_sparse: 0.0001
   tau_s: 0.2
   mask_init: 0.5
+
+fedproto:
+  lambda_proto: 0.1
 
 aggregation:
   mode: mask_proto_energy

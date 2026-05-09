@@ -16,6 +16,7 @@ from data.corruptions import CorruptedDataset
 from data.partition import (
     compute_client_label_distribution,
     dirichlet_partition,
+    iid_balanced_partition,
     print_client_label_distribution,
     save_client_label_distribution,
 )
@@ -252,7 +253,8 @@ def build_client_loaders(
     data_root = data_root or _cfg_value(cfg, "dataset", "data_root", "/kaggle/working/data")
     batch_size = int(batch_size or _cfg_value(cfg, "federated", "batch_size", 64))
     num_clients = int(num_clients or _cfg_value(cfg, "federated", "num_clients", 10))
-    alpha = float(alpha or _cfg_value(cfg, "federated", "dirichlet_alpha", 0.3))
+    partition_mode = str(_cfg_value(cfg, "federated", "partition_mode", "dirichlet")).lower()
+    alpha_value = alpha if alpha is not None else _cfg_value(cfg, "federated", "dirichlet_alpha", 0.3)
     num_classes = int(num_classes or _cfg_value(cfg, "dataset", "num_classes", 10))
     seed = int(seed if seed is not None else (cfg.get("seed", 42) if cfg else 42))
     result_dir = Path(
@@ -272,13 +274,29 @@ def build_client_loaders(
         else []
     )
 
-    client_indices = dirichlet_partition(
-        dataset=train_dataset,
-        num_clients=num_clients,
-        alpha=alpha,
-        num_classes=num_classes,
-        seed=seed,
-    )
+    if partition_mode in {"iid", "balanced_iid", "iid_balanced"}:
+        print("Using balanced IID client partition.")
+        client_indices = iid_balanced_partition(
+            dataset=train_dataset,
+            num_clients=num_clients,
+            num_classes=num_classes,
+            seed=seed,
+        )
+    elif partition_mode == "dirichlet":
+        alpha_float = float(alpha_value)
+        print(f"Using Dirichlet client partition with alpha={alpha_float}.")
+        client_indices = dirichlet_partition(
+            dataset=train_dataset,
+            num_clients=num_clients,
+            alpha=alpha_float,
+            num_classes=num_classes,
+            seed=seed,
+        )
+    else:
+        raise ValueError(
+            "Unsupported federated.partition_mode="
+            f"{partition_mode!r}. Use 'iid' or 'dirichlet'."
+        )
 
     distribution = compute_client_label_distribution(train_dataset, client_indices, num_classes)
     print_client_label_distribution(distribution)

@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from losses.prototype_scl import prototype_scl_loss
+from losses.prototype_scl import prototype_mse_loss
 from utils.metrics import evaluate_model
 
 
@@ -27,6 +27,7 @@ class Client:
         local_epochs: int = 1,
         tau_s: float = 0.2,
         lambda_scl: float = 0.1,
+        lambda_proto: float | None = None,
         global_prototypes: torch.Tensor | None = None,
     ) -> None:
         self.client_id = client_id
@@ -39,6 +40,7 @@ class Client:
         self.local_epochs = local_epochs
         self.tau_s = tau_s
         self.lambda_scl = lambda_scl
+        self.lambda_proto = lambda_scl if lambda_proto is None else lambda_proto
         self.global_prototypes = global_prototypes
         self.criterion = nn.CrossEntropyLoss()
 
@@ -66,13 +68,12 @@ class Client:
                 logits = self.model.classifier(features)
 
                 loss_ce = self.criterion(logits, labels)
-                loss_scl = prototype_scl_loss(
+                loss_proto = prototype_mse_loss(
                     features=features,
                     labels=labels,
                     global_prototypes=self.global_prototypes,
-                    tau_s=self.tau_s,
                 )
-                loss = loss_ce + self.lambda_scl * loss_scl
+                loss = loss_ce + self.lambda_proto * loss_proto
                 loss.backward()
                 self.optimizer.step()
 

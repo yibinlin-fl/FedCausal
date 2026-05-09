@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import csv
+import shutil
 from pathlib import Path
 from statistics import pstdev
 from typing import Any, Dict, Iterable, List, Mapping, Optional
@@ -48,6 +50,58 @@ def _with_output_subdir(config: Mapping[str, Any], experiment_name: str) -> Dict
         output[key] = str(base / experiment_name)
     _ensure_dirs(cfg)
     return cfg
+
+
+def _tables_dir_for_result_dir(result_dir: str | Path) -> Path:
+    result_dir = Path(result_dir)
+    project_root = result_dir.parent.parent if result_dir.parent.name == "results" else result_dir.parent
+    table_dir = project_root / "tables" / result_dir.name
+    table_dir.mkdir(parents=True, exist_ok=True)
+    return table_dir
+
+
+def _format_markdown_value(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.6f}"
+    return str(value)
+
+
+def write_markdown_table(rows: List[Mapping[str, Any]], path: str | Path) -> Path:
+    """Write a small Markdown table for quick Kaggle inspection."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        path.write_text("| empty |\n| --- |\n", encoding="utf-8")
+        return path
+
+    headers = list(rows[0].keys())
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(_format_markdown_value(row.get(header, "")) for header in headers) + " |")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _copy_method_artifacts(method_name: str, outputs: Mapping[str, Any]) -> Dict[str, Path]:
+    """Keep method-specific copies of generic CSV/checkpoint artifacts."""
+    copied: Dict[str, Path] = {}
+    for key, suffix in [
+        ("attack_csv", "aggregation_weights"),
+        ("global_mask_path", "global_mask"),
+    ]:
+        source = outputs.get(key)
+        if not source:
+            continue
+        source_path = Path(source)
+        if not source_path.exists():
+            continue
+        destination = source_path.with_name(f"{method_name}_{suffix}{source_path.suffix}")
+        shutil.copy2(source_path, destination)
+        copied[key] = destination
+    return copied
 
 
 def make_iid_no_attack_config(
@@ -149,6 +203,113 @@ def _write_clean_summary(
     return path
 
 
+def _load_corrupted_client_ids(result_dir: str | Path) -> List[int]:
+    path = Path(result_dir) / "corrupted_client_ids.csv"
+    if not path.exists():
+        return []
+
+    with path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        return sorted(int(row["client_id"]) for row in reader if row.get("client_id") not in ("", None))
+
+
+def _mean(values: List[float]) -> float | str:
+    return sum(values) / len(values) if values else ""
+
+
+def summarize_corrupted_client_trust(
+    method: str,
+    aggregation_csv: str | Path,
+    corrupted_client_ids: List[int],
+    experiment_name: str,
+) -> Dict[str, Any]:
+    """Summarize final-round trust weights for corrupted vs clean clients."""
+    aggregation_csv = Path(aggregation_csv)
+    if not aggregation_csv.exists():
+        return {
+            "experiment": experiment_name,
+            "method": method,
+            "final_round": "",
+            "num_corrupted_clients": len(corrupted_client_ids),
+            "alpha_corrupted": "",
+            "alpha_clean": "",
+            "alpha_ratio_corrupted_to_clean": "",
+            "energy_corrupted": "",
+            "energy_clean": "",
+            "aggregation_csv": aggregation_csv,
+        }
+
+    with aggregation_csv.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    valid_rows = [row for row in rows if row.get("round") not in ("", None)]
+    if not valid_rows:
+        return {
+            "experiment": experiment_name,
+            "method": method,
+            "final_round": "",
+            "num_corrupted_clients": len(corrupted_client_ids),
+            "alpha_corrupted": "",
+            "alpha_clean": "",
+            "alpha_ratio_corrupted_to_clean": "",
+            "energy_corrupted": "",
+            "energy_clean": "",
+            "aggregation_csv": aggregation_csv,
+        }
+
+    final_round = max(int(row["round"]) for row in valid_rows)
+    final_rows = [row for row in valid_rows if int(row["round"]) == final_round]
+    corrupted_set = set(corrupted_client_ids)
+    corrupted_rows = [row for row in final_rows if int(row["client_id"]) in corrupted_set]
+    clean_rows = [row for row in final_rows if int(row["client_id"]) not in corrupted_set]
+
+    alpha_corrupted = _mean([float(row["alpha_i"]) for row in corrupted_rows if row.get("alpha_i") not in ("", None)])
+    alpha_clean = _mean([float(row["alpha_i"]) for row in clean_rows if row.get("alpha_i") not in ("", None)])
+    energy_corrupted = _mean([float(row["energy"]) for row in corrupted_rows if row.get("energy") not in ("", None)])
+    energy_clean = _mean([float(row["energy"]) for row in clean_rows if row.get("energy") not in ("", None)])
+    alpha_ratio: float | str = ""
+    if isinstance(alpha_corrupted, float) and isinstance(alpha_clean, float) and alpha_clean != 0.0:
+        alpha_ratio = alpha_corrupted / alpha_clean
+
+    return {
+        "experiment": experiment_name,
+        "method": method,
+        "final_round": final_round,
+        "num_corrupted_clients": len(corrupted_client_ids),
+        "alpha_corrupted": alpha_corrupted,
+        "alpha_clean": alpha_clean,
+        "alpha_ratio_corrupted_to_clean": alpha_ratio,
+        "energy_corrupted": energy_corrupted,
+        "energy_clean": energy_clean,
+        "aggregation_csv": aggregation_csv,
+    }
+
+
+def _write_corrupted_client_trust_summary(
+    rows: List[Mapping[str, Any]],
+    path: str | Path,
+    reset: bool = True,
+) -> Path:
+    path = Path(path)
+    logger = CSVLogger(
+        path,
+        fieldnames=[
+            "experiment",
+            "method",
+            "final_round",
+            "num_corrupted_clients",
+            "alpha_corrupted",
+            "alpha_clean",
+            "alpha_ratio_corrupted_to_clean",
+            "energy_corrupted",
+            "energy_clean",
+            "aggregation_csv",
+        ],
+        reset=reset,
+    )
+    logger.log_many(rows)
+    return path
+
+
 def run_clean_iid_model_heterogeneity(
     config: Mapping[str, Any],
     methods: Optional[List[str]] = None,
@@ -165,6 +326,7 @@ def run_clean_iid_model_heterogeneity(
     for method in methods:
         print(f"\n[Experiment 1] Training {method}")
         method_outputs = _run_method(method, cfg, debug=debug)
+        _copy_method_artifacts(method_outputs["method_name"], method_outputs)
         outputs_by_method[method_outputs["method_name"]] = method_outputs
         clean_rows.append(
             summarize_clean_history(
@@ -179,11 +341,14 @@ def run_clean_iid_model_heterogeneity(
         clean_rows,
         result_dir / "exp1_iid_clean_summary.csv",
     )
+    table_dir = _tables_dir_for_result_dir(result_dir)
+    clean_summary_md = write_markdown_table(clean_rows, table_dir / "exp1_iid_clean_summary.md")
     return {
         "config": cfg,
         "outputs": outputs_by_method,
         "clean_rows": clean_rows,
         "clean_summary_csv": clean_summary_csv,
+        "clean_summary_md": clean_summary_md,
     }
 
 
@@ -215,6 +380,7 @@ def run_clean_iid_cifar10c_robustness(
 
     clean_rows: List[Dict[str, Any]] = []
     corruption_rows: List[Dict[str, Any]] = []
+    trust_rows: List[Dict[str, Any]] = []
     outputs_by_method: Dict[str, Dict[str, Any]] = {}
     rounds = int(_cfg(cfg, "federated", "rounds", 20))
     if debug:
@@ -246,6 +412,7 @@ def run_clean_iid_cifar10c_robustness(
         print(f"\n[Experiment 2] Training {method}")
         method_outputs = _run_method(method, cfg, debug=debug)
         method_name = method_outputs["method_name"]
+        copied_artifacts = _copy_method_artifacts(method_name, method_outputs)
         outputs_by_method[method_name] = method_outputs
         clean_rows.append(
             summarize_clean_history(
@@ -266,17 +433,54 @@ def run_clean_iid_cifar10c_robustness(
         corruption_logger.log_many(rows)
         corruption_rows.extend(rows)
 
+        aggregation_csv = copied_artifacts.get("attack_csv")
+        if train_corruption_enabled and aggregation_csv is not None:
+            corrupted_client_ids = _load_corrupted_client_ids(result_dir)
+            trust_rows.append(
+                summarize_corrupted_client_trust(
+                    method=method_name,
+                    aggregation_csv=aggregation_csv,
+                    corrupted_client_ids=corrupted_client_ids,
+                    experiment_name=experiment_name,
+                )
+            )
+
     clean_summary_csv = _write_clean_summary(
         clean_rows,
         result_dir / f"{experiment_name}_clean_summary.csv",
     )
+    table_dir = _tables_dir_for_result_dir(result_dir)
+    clean_summary_md = write_markdown_table(
+        clean_rows,
+        table_dir / f"{experiment_name}_clean_summary.md",
+    )
+    corruption_summary_md = write_markdown_table(
+        corruption_rows,
+        table_dir / f"{experiment_name}_cifar10c_summary.md",
+    )
+    trust_summary_csv = None
+    trust_summary_md = None
+    if train_corruption_enabled:
+        trust_summary_csv = _write_corrupted_client_trust_summary(
+            trust_rows,
+            result_dir / f"{experiment_name}_trust_summary.csv",
+        )
+        trust_summary_md = write_markdown_table(
+            trust_rows,
+            table_dir / f"{experiment_name}_trust_summary.md",
+        )
     return {
         "config": cfg,
         "outputs": outputs_by_method,
         "clean_rows": clean_rows,
         "corruption_rows": corruption_rows,
+        "trust_rows": trust_rows,
         "clean_summary_csv": clean_summary_csv,
         "corruption_summary_csv": corruption_csv,
+        "trust_summary_csv": trust_summary_csv,
+        "clean_summary_md": clean_summary_md,
+        "corruption_summary_md": corruption_summary_md,
+        "trust_summary_md": trust_summary_md,
     }
 
 
@@ -328,6 +532,7 @@ def run_clean_iid_experiments_1_and_2(
         print(f"\n[Experiments 1+2] Training {method}")
         method_outputs = _run_method(method, cfg, debug=debug)
         method_name = method_outputs["method_name"]
+        _copy_method_artifacts(method_name, method_outputs)
         outputs_by_method[method_name] = method_outputs
         clean_rows.append(
             summarize_clean_history(
@@ -352,6 +557,15 @@ def run_clean_iid_experiments_1_and_2(
         clean_rows,
         result_dir / "exp1_iid_clean_summary.csv",
     )
+    table_dir = _tables_dir_for_result_dir(result_dir)
+    clean_summary_md = write_markdown_table(
+        clean_rows,
+        table_dir / "exp1_iid_clean_summary.md",
+    )
+    corruption_summary_md = write_markdown_table(
+        corruption_rows,
+        table_dir / "exp2_iid_cifar10c_summary.md",
+    )
     return {
         "config": cfg,
         "outputs": outputs_by_method,
@@ -359,7 +573,72 @@ def run_clean_iid_experiments_1_and_2(
         "corruption_rows": corruption_rows,
         "clean_summary_csv": clean_summary_csv,
         "corruption_summary_csv": corruption_csv,
+        "clean_summary_md": clean_summary_md,
+        "corruption_summary_md": corruption_summary_md,
     }
+
+
+def run_iid_corrupted_client_clean_and_cifar10c_test(
+    config: Mapping[str, Any],
+    methods: Optional[List[str]] = None,
+    corruptions: Optional[List[str]] = None,
+    severities: Optional[List[int]] = None,
+    debug: bool = False,
+    experiment_name: str = "exp3_iid_corrupted_clients_clean_cifar10c_test",
+    train_corruption_type: str = "gaussian_noise",
+    train_corruption_ratio: float = 0.3,
+    train_corruption_severity: int = 3,
+) -> Dict[str, Any]:
+    """Experiment 3: IID data with partially corrupted clients, no attack."""
+    return run_clean_iid_cifar10c_robustness(
+        config=config,
+        methods=methods,
+        corruptions=corruptions,
+        severities=severities,
+        debug=debug,
+        experiment_name=experiment_name,
+        train_corruption_enabled=True,
+        train_corruption_type=train_corruption_type,
+        train_corruption_ratio=train_corruption_ratio,
+        train_corruption_severity=train_corruption_severity,
+    )
+
+
+def run_three_experiment_suite(
+    config: Mapping[str, Any],
+    methods: Optional[List[str]] = None,
+    corruptions: Optional[List[str]] = None,
+    severities: Optional[List[int]] = None,
+    debug: bool = False,
+    run_experiment_3: bool = True,
+    train_corruption_type: str = "gaussian_noise",
+    train_corruption_ratio: float = 0.3,
+    train_corruption_severity: int = 3,
+) -> Dict[str, Any]:
+    """Run Experiments 1, 2, and optionally 3 in Kaggle."""
+    methods = methods or DEFAULT_METHODS
+    results: Dict[str, Any] = {}
+    results["exp1_2"] = run_clean_iid_experiments_1_and_2(
+        config=config,
+        methods=methods,
+        corruptions=corruptions,
+        severities=severities,
+        debug=debug,
+    )
+
+    if run_experiment_3:
+        results["exp3"] = run_iid_corrupted_client_clean_and_cifar10c_test(
+            config=config,
+            methods=methods,
+            corruptions=corruptions,
+            severities=severities,
+            debug=debug,
+            train_corruption_type=train_corruption_type,
+            train_corruption_ratio=train_corruption_ratio,
+            train_corruption_severity=train_corruption_severity,
+        )
+
+    return results
 
 
 def run_four_experiment_suite(

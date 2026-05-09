@@ -66,33 +66,43 @@ CORRUPTIONS = [
 ]
 SEVERITIES = [1, 3, 5]
 
-# Default: run only Experiment 1 and Experiment 2.
-# Set this to True when you are ready to also run:
-#   Experiment 3: 30% gaussian-noise corrupted clients, no attack
-#   Experiment 4: 30% jpeg-compression corrupted clients, no attack
-RUN_CORRUPTED_CLIENT_EXPERIMENTS = False
+# Default: run Experiment 1, Experiment 2, and Experiment 3.
+# Experiment 3 keeps labels IID but corrupts 30% of client training images.
+RUN_EXPERIMENT_3 = True
+TRAIN_CORRUPTION_TYPE = "gaussian_noise"
+TRAIN_CORRUPTION_RATIO = 0.3
+TRAIN_CORRUPTION_SEVERITY = 3
 
 # Debug mode shrinks to at most 5 clients and 3 rounds inside each method.
 # Keep False for the real Kaggle run.
 DEBUG = False
 
-from run_iid_experiments import run_four_experiment_suite
+from run_iid_experiments import run_three_experiment_suite
 
-results = run_four_experiment_suite(
+results = run_three_experiment_suite(
     config=config,
     methods=METHODS,
     corruptions=CORRUPTIONS,
     severities=SEVERITIES,
     debug=DEBUG,
-    run_corrupted_client_experiments=RUN_CORRUPTED_CLIENT_EXPERIMENTS,
+    run_experiment_3=RUN_EXPERIMENT_3,
+    train_corruption_type=TRAIN_CORRUPTION_TYPE,
+    train_corruption_ratio=TRAIN_CORRUPTION_RATIO,
+    train_corruption_severity=TRAIN_CORRUPTION_SEVERITY,
 )
 
 print("\nFinished IID experiment suite.")
 for name, output in results.items():
     print(f"\n{name}")
     if isinstance(output, dict):
-        for key in ["clean_summary_csv", "corruption_summary_csv"]:
+        for key in [
+            "clean_summary_csv",
+            "corruption_summary_csv",
+            "trust_summary_csv",
+            "clean_summary_md",
+            "corruption_summary_md",
+            "trust_summary_md",
+        ]:
             value = output.get(key)
             if value:
                 print(f"  {key}: {value}")
-

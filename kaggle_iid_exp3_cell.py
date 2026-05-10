@@ -1,4 +1,4 @@
-# Kaggle one-cell launcher for the IID FedCausal experiment suite.
+# Kaggle one-cell launcher for Experiment 3.
 # Paste this whole file into one Kaggle Notebook cell after the project is
 # available at /kaggle/working/FedCausal.
 
@@ -34,7 +34,6 @@ config_path = PROJECT_ROOT / "configs" / "default_kaggle.yaml"
 with config_path.open("r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
-# Core IID model-heterogeneity setup.
 config["device"] = "cuda" if torch.cuda.is_available() else "cpu"
 config["federated"]["num_clients"] = 10
 config["federated"]["rounds"] = 130
@@ -44,17 +43,6 @@ config["federated"]["partition_mode"] = "iid"
 config["federated"]["participation_rate"] = 1.0
 config["attack"]["type"] = "none"
 config["attack"]["malicious_ratio"] = 0.0
-config["corruption"]["enable_train_corruption"] = False
-
-config.setdefault("output", {})
-config["output"]["checkpoint_dir"] = "/kaggle/temp/FedCausal/checkpoints"
-config["output"]["log_every"] = 10
-config["output"]["log_client_metrics"] = False
-config["output"]["save_checkpoints"] = False
-config["output"]["checkpoint_interval"] = 0
-config["output"]["save_mask_heatmaps"] = True
-config["output"]["heatmap_final_only"] = True
-config["output"]["heatmap_interval"] = 0
 
 config["model"]["client_models"] = [
     "cnn_small",
@@ -69,7 +57,16 @@ config["model"]["client_models"] = [
     "mobilenetv2",
 ]
 
-# Use heavier CIFAR-10-C severities for the longer verification run.
+config.setdefault("output", {})
+config["output"]["checkpoint_dir"] = "/kaggle/temp/FedCausal/checkpoints"
+config["output"]["log_every"] = 10
+config["output"]["log_client_metrics"] = False
+config["output"]["save_checkpoints"] = False
+config["output"]["checkpoint_interval"] = 0
+config["output"]["save_mask_heatmaps"] = True
+config["output"]["heatmap_final_only"] = True
+config["output"]["heatmap_interval"] = 0
+
 METHODS = ["fedproto", "fedcausal_mask", "fedcausal_mvp"]
 CORRUPTIONS = [
     "gaussian_noise",
@@ -79,81 +76,42 @@ CORRUPTIONS = [
     "jpeg_compression",
 ]
 SEVERITIES = [3, 5]
-
-# Use "exp1_2" or "exp3" on Kaggle to avoid filling the output disk.
-# Use "all" only when you intentionally want the full suite in one session.
-EXPERIMENT_PHASE = "exp1_2"
-
-# Experiment 3 keeps labels IID but corrupts 30% of client training images.
 TRAIN_CORRUPTION_TYPE = "gaussian_noise"
 TRAIN_CORRUPTION_RATIO = 0.3
 TRAIN_CORRUPTION_SEVERITY = 3
-
-# Debug mode shrinks to at most 5 clients and 3 rounds inside each method.
-# Keep False for the real Kaggle run.
 DEBUG = False
 
-from run_iid_experiments import (
-    run_clean_iid_experiments_1_and_2,
-    run_iid_corrupted_client_clean_and_cifar10c_test,
-    run_three_experiment_suite,
-)
+from run_iid_experiments import run_iid_corrupted_client_clean_and_cifar10c_test
 
-if EXPERIMENT_PHASE == "exp1_2":
-    results = {
-        "exp1_2": run_clean_iid_experiments_1_and_2(
-            config=config,
-            methods=METHODS,
-            corruptions=CORRUPTIONS,
-            severities=SEVERITIES,
-            debug=DEBUG,
-        )
-    }
-elif EXPERIMENT_PHASE == "exp3":
-    results = {
-        "exp3": run_iid_corrupted_client_clean_and_cifar10c_test(
-            config=config,
-            methods=METHODS,
-            corruptions=CORRUPTIONS,
-            severities=SEVERITIES,
-            debug=DEBUG,
-            train_corruption_type=TRAIN_CORRUPTION_TYPE,
-            train_corruption_ratio=TRAIN_CORRUPTION_RATIO,
-            train_corruption_severity=TRAIN_CORRUPTION_SEVERITY,
-        )
-    }
-elif EXPERIMENT_PHASE == "all":
-    results = run_three_experiment_suite(
+results = {
+    "exp3": run_iid_corrupted_client_clean_and_cifar10c_test(
         config=config,
         methods=METHODS,
         corruptions=CORRUPTIONS,
         severities=SEVERITIES,
         debug=DEBUG,
-        run_experiment_3=True,
         train_corruption_type=TRAIN_CORRUPTION_TYPE,
         train_corruption_ratio=TRAIN_CORRUPTION_RATIO,
         train_corruption_severity=TRAIN_CORRUPTION_SEVERITY,
     )
-else:
-    raise ValueError("EXPERIMENT_PHASE must be one of {'exp1_2', 'exp3', 'all'}.")
+}
 
-print("\nFinished IID experiment suite.")
+print("\nFinished Experiment 3.")
 for name, output in results.items():
     print(f"\n{name}")
-    if isinstance(output, dict):
-        for key in [
-            "clean_summary_csv",
-            "corruption_summary_csv",
-            "trust_summary_csv",
-            "clean_summary_md",
-            "corruption_summary_md",
-            "trust_summary_md",
-        ]:
-            value = output.get(key)
-            if value:
-                print(f"  {key}: {value}")
+    for key in [
+        "clean_summary_csv",
+        "corruption_summary_csv",
+        "trust_summary_csv",
+        "clean_summary_md",
+        "corruption_summary_md",
+        "trust_summary_md",
+    ]:
+        value = output.get(key)
+        if value:
+            print(f"  {key}: {value}")
 
-zip_path = Path(f"/kaggle/working/fedcausal_{EXPERIMENT_PHASE}_130rounds_outputs.zip")
+zip_path = Path("/kaggle/working/fedcausal_exp3_130rounds_outputs.zip")
 with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
     for folder_name in ("results", "tables", "figures"):
         folder = PROJECT_ROOT / folder_name

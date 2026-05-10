@@ -1,0 +1,117 @@
+# Kaggle one-cell launcher for Experiments 1+2.
+# Paste this whole file into one Kaggle Notebook cell after the project is
+# available at /kaggle/working/FedCausal.
+
+import os
+import sys
+import zipfile
+from pathlib import Path
+
+import torch
+import yaml
+
+PROJECT_ROOT = Path("/kaggle/working/FedCausal")
+if not PROJECT_ROOT.exists():
+    raise FileNotFoundError(
+        "FedCausal project directory not found at /kaggle/working/FedCausal. "
+        "Upload or copy the project there before running this cell."
+    )
+
+os.chdir(PROJECT_ROOT)
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+print("Working directory:", Path.cwd())
+print("CUDA available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
+print(
+    "CIFAR-10-C: if it is not attached under /kaggle/input, the evaluation code "
+    "will try to download it to /kaggle/temp. Enable Internet in Kaggle for that path."
+)
+
+config_path = PROJECT_ROOT / "configs" / "default_kaggle.yaml"
+with config_path.open("r", encoding="utf-8") as f:
+    config = yaml.safe_load(f)
+
+config["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+config["federated"]["num_clients"] = 10
+config["federated"]["rounds"] = 130
+config["federated"]["local_epochs"] = 1
+config["federated"]["batch_size"] = 64
+config["federated"]["partition_mode"] = "iid"
+config["federated"]["participation_rate"] = 1.0
+config["attack"]["type"] = "none"
+config["attack"]["malicious_ratio"] = 0.0
+config["corruption"]["enable_train_corruption"] = False
+
+config["model"]["client_models"] = [
+    "cnn_small",
+    "cnn_small",
+    "cnn_small",
+    "cnn_small",
+    "resnet18",
+    "resnet18",
+    "resnet18",
+    "mobilenetv2",
+    "mobilenetv2",
+    "mobilenetv2",
+]
+
+config.setdefault("output", {})
+config["output"]["checkpoint_dir"] = "/kaggle/temp/FedCausal/checkpoints"
+config["output"]["log_every"] = 10
+config["output"]["log_client_metrics"] = False
+config["output"]["save_checkpoints"] = False
+config["output"]["checkpoint_interval"] = 0
+config["output"]["save_mask_heatmaps"] = True
+config["output"]["heatmap_final_only"] = True
+config["output"]["heatmap_interval"] = 0
+
+METHODS = ["fedproto", "fedcausal_mask", "fedcausal_mvp"]
+CORRUPTIONS = [
+    "gaussian_noise",
+    "shot_noise",
+    "motion_blur",
+    "fog",
+    "jpeg_compression",
+]
+SEVERITIES = [3, 5]
+DEBUG = False
+
+from run_iid_experiments import run_clean_iid_experiments_1_and_2
+
+results = {
+    "exp1_2": run_clean_iid_experiments_1_and_2(
+        config=config,
+        methods=METHODS,
+        corruptions=CORRUPTIONS,
+        severities=SEVERITIES,
+        debug=DEBUG,
+    )
+}
+
+print("\nFinished Experiments 1+2.")
+for name, output in results.items():
+    print(f"\n{name}")
+    for key in [
+        "clean_summary_csv",
+        "corruption_summary_csv",
+        "clean_summary_md",
+        "corruption_summary_md",
+    ]:
+        value = output.get(key)
+        if value:
+            print(f"  {key}: {value}")
+
+zip_path = Path("/kaggle/working/fedcausal_exp1_2_130rounds_outputs.zip")
+with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    for folder_name in ("results", "tables", "figures"):
+        folder = PROJECT_ROOT / folder_name
+        if not folder.exists():
+            continue
+        for path in folder.rglob("*"):
+            if path.is_file():
+                zf.write(path, arcname=path.relative_to(PROJECT_ROOT))
+
+print(f"\nPackaged results/tables/figures to: {zip_path}")

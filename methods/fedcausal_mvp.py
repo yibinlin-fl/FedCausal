@@ -283,6 +283,14 @@ def _as_bool(value: Any) -> bool:
     return bool(value)
 
 
+def _should_log_round(round_id: int, rounds: int, log_every: int) -> bool:
+    return round_id == 0 or (round_id + 1) % log_every == 0 or (round_id + 1) == rounds
+
+
+def _should_save_interval(round_id: int, rounds: int, interval: int) -> bool:
+    return (round_id + 1) == rounds or (interval > 0 and (round_id + 1) % interval == 0)
+
+
 def run_fedcausal_mvp(
     config: Mapping[str, Any],
     debug: bool = False,
@@ -390,6 +398,14 @@ def run_fedcausal_mvp(
         _cfg(config, "output", "checkpoint_dir", "/kaggle/working/FedCausal/checkpoints")
     )
     figure_dir = Path(_cfg(config, "output", "figure_dir", "/kaggle/working/FedCausal/figures"))
+    output_cfg = config.get("output", {})
+    log_every = max(1, int(output_cfg.get("log_every", 1)))
+    log_client_metrics = _as_bool(output_cfg.get("log_client_metrics", True))
+    save_checkpoints = _as_bool(output_cfg.get("save_checkpoints", True))
+    checkpoint_interval = int(output_cfg.get("checkpoint_interval", 5))
+    save_mask_heatmaps = _as_bool(output_cfg.get("save_mask_heatmaps", True))
+    heatmap_interval = int(output_cfg.get("heatmap_interval", 5))
+    heatmap_final_only = _as_bool(output_cfg.get("heatmap_final_only", False))
     result_csv = result_dir / f"{method_name}_clean_results.csv"
     malicious_ids_path = result_dir / "malicious_client_ids.json"
     save_malicious_client_ids(
@@ -442,7 +458,9 @@ def run_fedcausal_mvp(
 
     history: List[Dict[str, Any]] = []
     for round_id in range(rounds):
-        print(f"\n[{method_name}] Round {round_id + 1}/{rounds}")
+        should_log = _should_log_round(round_id, rounds, log_every)
+        if should_log:
+            print(f"\n[{method_name}] Round {round_id + 1}/{rounds}")
         selected_client_ids = _select_clients(num_clients, participation_rate, round_id, seed)
         global_prototypes = server.get_global_prototypes()
         global_mask = server.get_global_mask()
@@ -454,13 +472,14 @@ def run_fedcausal_mvp(
             train_metrics = client.train_one_round(global_prototypes, global_mask)
             train_metrics_by_client[client_id] = train_metrics
             payloads.append(client.compute_local_payload())
-            print(
-                f"  client={client_id:02d} "
-                f"loss={train_metrics['local_loss']:.4f} "
-                f"local_acc={train_metrics['local_acc']:.4f} "
-                f"loss_inv={train_metrics['loss_inv']:.4f} "
-                f"valid={train_metrics['valid_donor_ratio']:.3f}"
-            )
+            if should_log and log_client_metrics:
+                print(
+                    f"  client={client_id:02d} "
+                    f"loss={train_metrics['local_loss']:.4f} "
+                    f"local_acc={train_metrics['local_acc']:.4f} "
+                    f"loss_inv={train_metrics['loss_inv']:.4f} "
+                    f"valid={train_metrics['valid_donor_ratio']:.3f}"
+                )
 
         aggregation_stats = server.aggregate(payloads)
         aggregation_stats_by_client = {
@@ -471,12 +490,20 @@ def run_fedcausal_mvp(
         mask_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"round": round_id, "global_mask": current_global_mask}, mask_path)
 
-        if (round_id + 1) % 5 == 0 or (round_id + 1) == rounds:
+        should_save_heatmap = (
+            save_mask_heatmaps
+            and (
+                (heatmap_final_only and (round_id + 1) == rounds)
+                or (not heatmap_final_only and _should_save_interval(round_id, rounds, heatmap_interval))
+            )
+        )
+        if should_save_heatmap:
             heatmap_path = save_mask_heatmap(
                 current_global_mask,
                 figure_dir / f"{method_name}_global_mask_round_{round_id + 1}.png",
             )
-            print(f"  saved mask heatmap: {heatmap_path}")
+            if should_log:
+                print(f"  saved mask heatmap: {heatmap_path}")
 
         clean_accs = []
         clean_acc_by_client: Dict[int, float] = {}
@@ -526,13 +553,14 @@ def run_fedcausal_mvp(
             )
 
         mean_clean_acc = sum(clean_accs) / len(clean_accs) if clean_accs else 0.0
-        print(
-            f"  mean_clean_acc={mean_clean_acc:.4f} "
-            f"global_mask_mean={current_global_mask.mean().item():.4f} "
-            f"global_mask_std={current_global_mask.std(unbiased=False).item():.4f}"
-        )
+        if should_log:
+            print(
+                f"  mean_clean_acc={mean_clean_acc:.4f} "
+                f"global_mask_mean={current_global_mask.mean().item():.4f} "
+                f"global_mask_std={current_global_mask.std(unbiased=False).item():.4f}"
+            )
 
-        if (round_id + 1) % 5 == 0 or (round_id + 1) == rounds:
+        if save_checkpoints and _should_save_interval(round_id, rounds, checkpoint_interval):
             checkpoint_path = save_checkpoint(
                 {
                     "round": round_id,

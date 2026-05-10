@@ -20,6 +20,21 @@ from utils.seed import seed_everything
 def _cfg(cfg: Mapping[str, Any], section: str, key: str, default: Any) -> Any:
     return cfg.get(section, {}).get(key, default)
 
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _should_log_round(round_id: int, rounds: int, log_every: int) -> bool:
+    return round_id == 0 or (round_id + 1) % log_every == 0 or (round_id + 1) == rounds
+
+
+def _should_save_interval(round_id: int, rounds: int, interval: int) -> bool:
+    return (round_id + 1) == rounds or (interval > 0 and (round_id + 1) % interval == 0)
+
+
 def _build_optimizer(model: torch.nn.Module, cfg: Mapping[str, Any]) -> torch.optim.Optimizer:
     name = str(_cfg(cfg, "optimizer", "name", "adam")).lower()
     lr = float(_cfg(cfg, "optimizer", "lr", 0.001))
@@ -129,6 +144,11 @@ def run_fedproto(
     checkpoint_dir = Path(
         _cfg(config, "output", "checkpoint_dir", "/kaggle/working/FedCausal/checkpoints")
     )
+    output_cfg = config.get("output", {})
+    log_every = max(1, int(output_cfg.get("log_every", 1)))
+    log_client_metrics = _as_bool(output_cfg.get("log_client_metrics", True))
+    save_checkpoints = _as_bool(output_cfg.get("save_checkpoints", True))
+    checkpoint_interval = int(output_cfg.get("checkpoint_interval", 5))
     logger = CSVLogger(
         result_dir / "fedproto_clean_results.csv",
         fieldnames=["round", "method", "client_id", "local_loss", "local_acc", "clean_acc"],
@@ -137,7 +157,9 @@ def run_fedproto(
 
     history: List[Dict[str, Any]] = []
     for round_id in range(rounds):
-        print(f"\n[FedProto] Round {round_id + 1}/{rounds}")
+        should_log = _should_log_round(round_id, rounds, log_every)
+        if should_log:
+            print(f"\n[FedProto] Round {round_id + 1}/{rounds}")
         selected_client_ids = _select_clients(num_clients, participation_rate, round_id, seed)
         global_prototypes = server.get_global_prototypes()
 
@@ -148,11 +170,12 @@ def run_fedproto(
             train_metrics = client.train_one_round(global_prototypes)
             train_metrics_by_client[client_id] = train_metrics
             local_payloads.append(client.compute_local_prototypes())
-            print(
-                f"  client={client_id:02d} "
-                f"loss={train_metrics['local_loss']:.4f} "
-                f"local_acc={train_metrics['local_acc']:.4f}"
-            )
+            if should_log and log_client_metrics:
+                print(
+                    f"  client={client_id:02d} "
+                    f"loss={train_metrics['local_loss']:.4f} "
+                    f"local_acc={train_metrics['local_acc']:.4f}"
+                )
 
         server.aggregate(local_payloads)
 
@@ -175,9 +198,10 @@ def run_fedproto(
             history.append(row)
 
         mean_clean_acc = sum(clean_accs) / len(clean_accs) if clean_accs else 0.0
-        print(f"  mean_clean_acc={mean_clean_acc:.4f}")
+        if should_log:
+            print(f"  mean_clean_acc={mean_clean_acc:.4f}")
 
-        if (round_id + 1) % 5 == 0 or (round_id + 1) == rounds:
+        if save_checkpoints and _should_save_interval(round_id, rounds, checkpoint_interval):
             checkpoint_path = save_checkpoint(
                 {
                     "round": round_id,
